@@ -32,11 +32,12 @@ with sync_playwright() as p:
         pg.locator("table[aria-label='Spelplan'] button.pcell").nth(i).click(); pg.wait_for_selector("div.modal")
         for k,inp in enumerate(pg.locator("div.modal input[type=number]").all()): inp.fill(str((4-k)*1000000))
         pg.click("div.modal button:has-text('Spara resultat')"); pg.wait_for_selector("div.modal",state="detached")
-    pg.wait_for_selector(".pcell.done"); check(pg.locator(".pcell.done").count()==2,"båda borden klara")
+    pg.wait_for_function("document.querySelectorAll('.pcell.done').length===2"); check(pg.locator(".pcell.done").count()==2,"båda borden klara")
     check("7p" in pg.inner_text("table[aria-label='Spelplan']") and "1p" in pg.inner_text("table[aria-label='Spelplan']"),"placeringspoäng 7-5-3-1 visas i matrisen")
     check(pg.locator(".pmachine.busy").count()==0,"inga upptagna maskiner efter resultat")
     pg.wait_for_selector("table[aria-label='Ställning'] tbody tr"); check(pg.locator("table[aria-label='Ställning'] tbody tr").count()==8,"ställning med åtta spelare")
-    pg.click("button:has-text('Skapa omgång 2')"); pg.wait_for_selector("table[aria-label='Spelplan'] tbody th:has-text('Omgång 2')"); check(pg.locator("table[aria-label='Spelplan'] tbody tr").count()==2,"omgång 2 skapad")
+    pg.fill("textarea[aria-label='Spelare att lägga till']","Sen Spelare"); pg.click("section:has(h2:has-text('Spelare')) button:has-text('Lägg till')"); pg.wait_for_selector("ol[aria-label=Spelare] li >> nth=8"); check(pg.locator("ol[aria-label=Spelare] li").count()==9,"sen anmälan efter start lägger till spelare nummer nio")
+    pg.click("button:has-text('Skapa omgång 2')"); pg.wait_for_selector("table[aria-label='Spelplan'] tbody th:has-text('Omgång 2')"); check(pg.locator("table[aria-label='Spelplan'] tbody tr").count()==2,"omgång 2 skapad"); check(pg.locator("table[aria-label='Spelplan'] tbody tr:has(th:has-text('Omgång 2')) .pcell").count()==3,"omgång 2 har tre bord om tre (9 spelare) inklusive sena spelaren")
     pg.screenshot(path="/tmp/shots/5_flipper_matris.png")
     # publik live-vy
     H={"x-requested-with":"platform-customer","content-type":"application/json"}

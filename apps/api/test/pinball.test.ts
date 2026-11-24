@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addHistory, assignGroups, assignMachines, awardPoints, bestGameRanking, bracketPlacements, buildBracket, evaluateBracket, groupSizes, meetings, POINT_PRESETS, poolStandings, rngFrom, swissRound, type History } from '../src/domain/pinball.js';
+import { effectiveAdvance, groupKoRanking, rankGroup, addHistory, assignGroups, assignMachines, awardPoints, bestGameRanking, bracketPlacements, buildBracket, evaluateBracket, groupSizes, meetings, POINT_PRESETS, poolStandings, rngFrom, swissRound, type History } from '../src/domain/pinball.js';
 
 const ids = (n: number) => Array.from({ length: n }, (_, i) => `p${i + 1}`);
 const T = POINT_PRESETS['7-5-3-1']!;
@@ -91,5 +91,37 @@ describe('Flipper: utslagning', () => {
   it('frilottning: bästa seed går vidare utan match; alla matcher i första omgången har två riktiga spelare', () => {
     const nodes = buildBracket('single', 5); const st = evaluateBracket(nodes, ids(5), {});
     expect([...st.values()].filter((s) => s.status === 'bye').length).toBe(3); expect([...st.values()].filter((s) => s.status === 'ready').map((s) => [s.home, s.away])).toEqual([['p4', 'p5'], ['p2', 'p3']]);
+  });
+});
+
+describe('Flipper: bronsmatch och gruppslutspel', () => {
+  it('bronsmatch: semifinalförlorarna möts, vinnaren blir trea och förloraren fyra; turneringen är inte klar före bronsmatchen', () => {
+    for (let n = 3; n <= 17; n++) {
+      const nodes = buildBracket('single', n, true, true); const players = ids(n); const winners: Record<string, string> = {}; let sawBm = false;
+      for (let g = 0; g < 200; g++) {
+        const st = evaluateBracket(nodes, players, winners); const ready = [...st.values()].filter((x) => x.status === 'ready');
+        if (!ready.length) break;
+        const r = ready.find((x) => x.key !== 'BM') ?? ready[0]!; if (r.key === 'BM') { sawBm = true; expect(bracketPlacements(nodes, st), `n=${n} före bronsmatch`).toBeNull(); }
+        winners[r.key] = r.home!; // bäst seed vinner alltid
+      }
+      const st = evaluateBracket(nodes, players, winners); const pl = bracketPlacements(nodes, st)!; expect(pl, `n=${n}`).not.toBeNull();
+      expect(pl.map((x) => x.playerId).sort()).toEqual([...players].sort());
+      expect(pl.slice(0, 4).map((x) => x.rank)).toEqual([1, 2, 3, 4].slice(0, Math.min(4, n))); if (n >= 4) expect(sawBm, `n=${n}`).toBe(true);
+      expect(pl.slice(0, 2).map((x) => x.playerId)).toEqual(['p1', 'p2']); expect(new Set(pl.slice(2, Math.min(4, n)).map((x) => x.playerId))).toEqual(new Set(['p3', 'p4'].slice(0, Math.min(4, n) - 2))); // semifinalförlorarna spelar om tredjeplatsen
+    }
+    expect(buildBracket('single', 2, true, true).some((x) => x.key === 'BM')).toBe(false); expect(buildBracket('double', 8, true, true).some((x) => x.key === 'BM')).toBe(false);
+  });
+  it('grupp: flera spel summeras, lika poäng avgörs av förstaplatser och därefter seed; ingen delad placering', () => {
+    const g = (a: Array<[string, number, number]>) => ({ players: a.map(([id, placement, points]) => ({ id, placement, points })) });
+    const rows = rankGroup(['a', 'b', 'c', 'd'], [g([['a', 1, 7], ['b', 2, 5], ['c', 3, 3], ['d', 4, 1]]), g([['b', 1, 7], ['a', 2, 5], ['d', 3, 3], ['c', 4, 1]])], ['d', 'c', 'b', 'a']);
+    expect(rows.map((r) => [r.playerId, r.points, r.rank])).toEqual([['b', 12, 1], ['a', 12, 2], ['d', 4, 3], ['c', 4, 4]]); // lika poäng och förstaplatser: bäst seed först (d bäst, sedan c, b, a)
+    expect(effectiveAdvance(4, 2)).toBe(2); expect(effectiveAdvance(2, 2)).toBe(1); expect(effectiveAdvance(3, 1)).toBe(1);
+  });
+  it('slutplacering ur gruppslutspel: final först, därefter senaste utslagna', () => {
+    const row = (playerId: string, points: number, rank: number) => ({ playerId, games: 1, points, firsts: 0, rank });
+    const r1 = { advance: 2, groups: [[row('a', 7, 1), row('b', 5, 2), row('c', 3, 3), row('d', 1, 4)], [row('e', 7, 1), row('f', 5, 2), row('g', 3, 3), row('h', 1, 4)]] };
+    const fin = { advance: 2, groups: [[row('e', 7, 1), row('a', 5, 2), row('b', 3, 3), row('f', 1, 4)]] };
+    const r = groupKoRanking([r1, fin], ids(8).map((_, i) => 'abcdefgh'[i]!));
+    expect(r.map((x) => x.playerId)).toEqual(['e', 'a', 'b', 'f', 'c', 'g', 'd', 'h']); expect(r.map((x) => x.rank)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });

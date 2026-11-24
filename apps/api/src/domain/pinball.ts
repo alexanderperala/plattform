@@ -130,16 +130,16 @@ export function bestGameRanking(playerIds: string[], attempts: Attempt[], mode: 
 
 // ---------- Utslagning (enkel och dubbel) som generell grafmodell ----------
 export type Src = { seed: number } | { win: string } | { lose: string };
-export interface BNode { key: string; bracket: 'W' | 'L' | 'GF'; round: number; pos: number; home: Src; away: Src }
+export interface BNode { key: string; bracket: 'W' | 'L' | 'GF' | 'B'; round: number; pos: number; home: Src; away: Src }
 const log2 = (n: number) => Math.round(Math.log2(n));
 export const bracketSize = (n: number) => { let p = 2; while (p < n) p *= 2; return p; };
 
-export function buildBracket(kind: 'single' | 'double', n: number, grandFinalReset = true): BNode[] {
+export function buildBracket(kind: 'single' | 'double', n: number, grandFinalReset = true, bronze = false): BNode[] {
   if (n < 2) return [];
   const P = bracketSize(n); const k = log2(P); const nodes: BNode[] = []; const order = seedOrder(P);
   const W = (r: number, i: number) => `W${r}-${i}`; const L = (r: number, i: number) => `L${r}-${i}`;
   for (let r = 1; r <= k; r++) for (let i = 0; i < P / 2 ** r; i++) nodes.push({ key: W(r, i), bracket: 'W', round: r, pos: i, home: r === 1 ? { seed: order[2 * i]! } : { win: W(r - 1, 2 * i) }, away: r === 1 ? { seed: order[2 * i + 1]! } : { win: W(r - 1, 2 * i + 1) } });
-  if (kind === 'single') return nodes;
+  if (kind === 'single') { if (bronze && k >= 2) nodes.push({ key: 'BM', bracket: 'B', round: k, pos: 0, home: { lose: W(k - 1, 0) }, away: { lose: W(k - 1, 1) } }); return nodes; }
   if (P === 2) return nodes; // två spelare: bara en match
   const lbRounds = 2 * (k - 1); const count = (j: number) => P / 2 ** (Math.floor((j + 1) / 2) + 1);
   for (let j = 1; j <= lbRounds; j++) for (let i = 0; i < count(j); i++) {
@@ -187,10 +187,31 @@ export function bracketPlacements(nodes: BNode[], state: Map<string, NodeState>)
   const gf = nodes.filter((x) => x.bracket === 'GF'); const double = gf.length > 0;
   const final = double ? (state.get('GF2')?.status === 'done' || state.get('GF2')?.status === 'skipped' ? state.get('GF2')! : state.get('GF1')!) : state.get(`W${Math.max(...nodes.map((x) => x.round))}-0`)!;
   if (!final.winner || final.winner === BYE || final.status === 'pending' || final.status === 'ready') return null;
+  const bm = state.get('BM'); if (bm && (bm.status === 'pending' || bm.status === 'ready')) return null; // bronsmatchen måste vara avgjord
   const exit = new Map<string, number>(); const bump = (p: string | null, v: number) => { if (p && p !== BYE) exit.set(p, Math.max(exit.get(p) ?? 0, v)); };
-  for (const n of nodes) { const s = state.get(n.key)!; if (s.status === 'bye' || s.status === 'skipped') continue; if (n.bracket === 'W') bump(s.loser, double ? 0 : n.round); else if (n.bracket === 'L') bump(s.loser, n.round); else bump(s.loser, 1000 + n.round); }
+  for (const n of nodes) { const s = state.get(n.key)!; if (s.status === 'bye' || s.status === 'skipped') continue; if (n.bracket === 'W') bump(s.loser, double ? 0 : n.round); else if (n.bracket === 'L') bump(s.loser, n.round); else if (n.bracket === 'B') { bump(s.loser, n.round - 1 + 0.25); bump(s.winner, n.round - 1 + 0.5); } else bump(s.loser, 1000 + n.round); }
   bump(final.winner, 10_000);
   const ids = [...exit.keys()].sort((a, b) => exit.get(b)! - exit.get(a)!);
   const out: Array<{ playerId: string; rank: number }> = []; ids.forEach((id, i) => { const p = out[i - 1]; out.push({ playerId: id, rank: p && exit.get(ids[i - 1]!) === exit.get(id) ? p.rank : i + 1 }); });
   return out;
+}
+
+// ---------- Gruppslutspel (fyra spelare, de två bästa går vidare) ----------
+/** Placering i en grupp över ett eller flera spel: poäng, flest förstaplatser, därefter bäst seed. Alltid unik ordning (rank 1..n). */
+export function rankGroup(playerIds: string[], games: GameForStanding[], seedOrder: string[]): StandingRow[] {
+  const rows = poolStandings(playerIds, games).sort((a, b) => b.points - a.points || b.firsts - a.firsts || seedOrder.indexOf(a.playerId) - seedOrder.indexOf(b.playerId));
+  rows.forEach((r, i) => { r.rank = i + 1; }); return rows;
+}
+/** Hur många som går vidare ur en grupp: aldrig alla, så att varje omgång minskar fältet. */
+export const effectiveAdvance = (groupSize: number, advance: number) => Math.max(1, Math.min(advance, groupSize - 1));
+/** Slutplacering: sista gruppen (final) först; därefter de som åkte ut senast. Inom samma omgång avgör poäng, förstaplatser, seed. */
+export function groupKoRanking(rounds: Array<{ groups: StandingRow[][]; advance: number }>, seedOrder: string[]): Array<{ playerId: string; rank: number }> {
+  if (rounds.length === 0) return [];
+  const out: string[] = rounds[rounds.length - 1]!.groups.flatMap((g) => g.map((r) => r.playerId));
+  for (let i = rounds.length - 2; i >= 0; i--) {
+    const eliminated = rounds[i]!.groups.flatMap((g) => g.slice(effectiveAdvance(g.length, rounds[i]!.advance)));
+    eliminated.sort((a, b) => b.points - a.points || b.firsts - a.firsts || seedOrder.indexOf(a.playerId) - seedOrder.indexOf(b.playerId));
+    out.push(...eliminated.map((r) => r.playerId));
+  }
+  return out.map((playerId, i) => ({ playerId, rank: i + 1 }));
 }

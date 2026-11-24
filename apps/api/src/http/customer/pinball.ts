@@ -6,7 +6,7 @@ import { conflict, forbidden, notFound } from '../../lib/errors.js';
 import { audit } from '../../services/audit.js';
 import { canRead, canWrite } from '../../domain/access.js';
 import { roundRobin, roundName } from '../../domain/tournament.js';
-import { addHistory, assignGroups, assignMachines, awardPoints, bestGameRanking, bracketPlacements, buildBracket, evaluateBracket, groupSizes, POINT_PRESETS, poolStandings, rngFrom, swissRound, BYE, type BNode, type History, type NodeState, type PointsTable } from '../../domain/pinball.js';
+import { addHistory, assignGroups, assignMachines, awardPoints, bestGameRanking, bracketPlacements, buildBracket, evaluateBracket, groupSizes, POINT_PRESETS, poolStandings, rankGroup, effectiveAdvance, groupKoRanking, rngFrom, swissRound, BYE, type BNode, type History, type NodeState, type PointsTable } from '../../domain/pinball.js';
 import { modeFor, type Helpers } from './association.js';
 
 type Db = Parameters<typeof modeFor>[0];
@@ -22,17 +22,18 @@ const stageBody = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('matchplay'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ rounds: z.number().int().min(1).max(12), groupSize: z.union([z.literal(3), z.literal(4)]).default(4), points, grouping: z.enum(['random', 'balanced']).default('random'), advance }).strict() }).strict(),
   z.object({ kind: z.literal('swiss'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ rounds: z.number().int().min(1).max(12), groupSize: z.union([z.literal(2), z.literal(3), z.literal(4)]).default(2), points, advance }).strict() }).strict(),
   z.object({ kind: z.literal('round_robin'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ doubleRound: z.boolean().default(false), points, advance }).strict().default({ doubleRound: false, points: '7-5-3-1' }) }).strict(),
-  z.object({ kind: z.literal('single_elim'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ bestOf: z.union([z.literal(1), z.literal(3), z.literal(5)]).default(1), advance }).strict().default({ bestOf: 1 }) }).strict(),
+  z.object({ kind: z.literal('group_knockout'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ groupSize: z.union([z.literal(3), z.literal(4)]).default(4), advancePerGroup: z.union([z.literal(1), z.literal(2)]).default(2), gamesPerGroup: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(3), points, advance }).strict().default({ groupSize: 4, advancePerGroup: 2, gamesPerGroup: 3, points: '7-5-3-1' }) }).strict(),
+  z.object({ kind: z.literal('single_elim'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ bestOf: z.union([z.literal(1), z.literal(3), z.literal(5)]).default(1), bronzeMatch: z.boolean().default(false), advance }).strict().default({ bestOf: 1, bronzeMatch: false }) }).strict(),
   z.object({ kind: z.literal('double_elim'), name: z.string().trim().min(1).max(100).optional(), config: z.object({ bestOf: z.union([z.literal(1), z.literal(3), z.literal(5)]).default(1), grandFinalReset: z.boolean().default(true), advance }).strict().default({ bestOf: 1, grandFinalReset: true }) }).strict(),
 ]);
-const KIND_NAME: Record<string, string> = { best_game: 'Kval (försök)', matchplay: 'Matchplay', swiss: 'Swiss', round_robin: 'Serie', single_elim: 'Utslagning', double_elim: 'Dubbel utslagning' };
+const KIND_NAME: Record<string, string> = { best_game: 'Kval (försök)', matchplay: 'Matchplay', swiss: 'Swiss', round_robin: 'Serie', single_elim: 'Utslagning', group_knockout: 'Gruppslutspel', double_elim: 'Dubbel utslagning' };
 const names = z.object({ names: z.array(z.string().trim().min(1).max(100)).min(1).max(MAX_PLAYERS) }).strict();
 const scoreIn = z.object({ scores: z.array(z.object({ playerId: uuid, score: z.number().int().min(0).max(9_999_999_999_999) }).strict()).min(1).max(4) }).strict();
 
 interface Stage { id: string; no: number; kind: keyof typeof KIND_NAME; name: string; config: Record<string, any>; status: 'pending' | 'running' | 'finished'; current_round: number; final_ranking: Array<{ playerId: string; rank: number }> | null; rng_seed: number }
 const table = (s: Stage): PointsTable => POINT_PRESETS[(s.config.points as string) ?? '7-5-3-1'] ?? POINT_PRESETS['7-5-3-1']!;
-const nodesOf = (s: Stage): BNode[] => buildBracket(s.kind === 'double_elim' ? 'double' : 'single', (s.config._players as string[]).length, s.config.grandFinalReset !== false);
-const bracketRound = (n: BNode) => (n.bracket === 'W' ? n.round : n.bracket === 'L' ? 100 + n.round : 200 + n.round);
+const nodesOf = (s: Stage): BNode[] => buildBracket(s.kind === 'double_elim' ? 'double' : 'single', (s.config._players as string[]).length, s.config.grandFinalReset !== false, s.config.bronzeMatch === true);
+const bracketRound = (n: BNode) => (n.bracket === 'W' || n.bracket === 'B' ? n.round : n.bracket === 'L' ? 100 + n.round : 200 + n.round);
 
 export async function pinballView(c: Db, t: { id: string; [k: string]: unknown }) {
   const players = (await c.query('select id, name, seed, withdrawn from pinball_players where tournament_id = $1 order by seed, id', [t.id])).rows as Array<{ id: string; name: string; seed: number; withdrawn: boolean }>;
@@ -56,22 +57,32 @@ export async function pinballView(c: Db, t: { id: string; [k: string]: unknown }
       if (s.status === 'pending') return { ...base, groups: [], placements: null };
       const nodes = nodesOf(s); const state = evaluateBracket(nodes, ids, winnersOf(s, mine, games, scores));
       const total = Math.max(...nodes.filter((n) => n.bracket === 'W').map((n) => n.round));
-      const label = (n: BNode) => (n.bracket === 'GF' ? (n.round === 1 ? 'Grand final' : 'Grand final (omspel)') : s.kind === 'single_elim' ? roundName(n.round, total) : n.bracket === 'W' ? `Vinnarsida ${n.round}` : `Förlorarsida ${n.round}`);
+      const label = (n: BNode) => (n.bracket === 'B' ? 'Bronsmatch' : n.bracket === 'GF' ? (n.round === 1 ? 'Grand final' : 'Grand final (omspel)') : s.kind === 'single_elim' ? roundName(n.round, total) : n.bracket === 'W' ? `Vinnarsida ${n.round}` : `Förlorarsida ${n.round}`);
       const gs = nodes.map((n) => {
         const g = mine.find((x) => x.bracket_key === n.key)!; const st = state.get(n.key)!; const gm = gameOf(g.id);
         const status = st.status === 'ready' ? (gm.some((x) => x.status === 'playing') ? 'playing' : 'ready') : st.status;
         const pl = [st.home, st.away].filter((x): x is string => !!x && x !== BYE);
-        return { id: g.id, round: bracketRound(n), slot: g.slot, bracketKey: n.key, label: label(n), rowLabel: label(n), status, playerIds: pl, games: gm, winnerId: st.winner && st.winner !== BYE ? st.winner : null };
+        return { id: g.id, round: bracketRound(n), slot: g.slot, bracketKey: n.key, label: label(n), rowLabel: n.bracket === 'B' ? (s.kind === 'single_elim' ? roundName(n.round, total) : label(n)) : label(n), status, playerIds: pl, games: gm, winnerId: st.winner && st.winner !== BYE ? st.winner : null };
       });
       return { ...base, groups: gs, placements: bracketPlacements(nodes, state) };
     }
     const gs = mine.map((g) => {
       const gm = gameOf(g.id); const pl = gp.filter((x) => x.group_id === g.id).map((x) => x.player_id);
       const status = gm.every((x) => x.status === 'done') ? 'done' : gm.some((x) => x.status === 'playing') ? 'playing' : 'ready';
-      return { id: g.id, round: g.round, slot: g.slot, bracketKey: null, label: `Bord ${g.slot + 1}`, rowLabel: `Omgång ${g.round}`, status, playerIds: pl, games: gm, winnerId: null };
+      return { id: g.id, round: g.round, slot: g.slot, bracketKey: null, label: `Bord ${g.slot + 1}`, rowLabel: s.kind === 'group_knockout' ? `Omgång ${g.round}` : `Omgång ${g.round}`, status, playerIds: pl, games: gm, winnerId: null };
     });
-    const done = gs.filter((g) => g.games.length && g.games.every((x) => x.status === 'done')).map((g) => ({ players: g.games[0]!.scores.map((x) => ({ id: x.playerId, placement: x.placement, points: x.points })) }));
-    return { ...base, groups: gs, standings: poolStandings(ids, done), totalRounds: s.kind === 'round_robin' ? Math.max(0, ...gs.map((g) => g.round)) : (s.config.rounds as number) };
+    const doneGames = gs.flatMap((g) => g.games.filter((x) => x.status === 'done').map((x) => ({ players: x.scores.map((y) => ({ id: y.playerId, placement: y.placement, points: y.points })) })));
+    if (s.kind === 'group_knockout') {
+      const rounds = [...new Set(gs.map((g) => g.round))].sort((a, b) => a - b); const adv = s.config.advancePerGroup as number;
+      const results = rounds.map((r) => ({ round: r, groups: gs.filter((g) => g.round === r).map((g) => {
+        const rows = rankGroup(g.playerIds, g.games.filter((x) => x.status === 'done').map((x) => ({ players: x.scores.map((y) => ({ id: y.playerId, placement: y.placement, points: y.points })) })), ids); const n = effectiveAdvance(g.playerIds.length, adv);
+        return { groupId: g.id, complete: g.status === 'done', rows: rows.map((x) => ({ ...x, advances: x.rank <= n })) };
+      }) }));
+      const last = results[results.length - 1]; const finished = !!last && last.groups.length === 1 && last.groups[0]!.complete;
+      const placements = finished ? groupKoRanking(results.map((x) => ({ groups: x.groups.map((g) => g.rows), advance: adv })), ids) : null;
+      return { ...base, groups: gs, groupResults: results, placements, totalRounds: rounds.length };
+    }
+    return { ...base, groups: gs, standings: poolStandings(ids, doneGames), totalRounds: s.kind === 'round_robin' ? Math.max(0, ...gs.map((g) => g.round)) : (s.config.rounds as number) };
   });
   const active = stages.find((s) => s.status === 'running') ?? [...stages].reverse().find((s) => s.status === 'finished') ?? stages[0];
   return { ...camelAll([t])[0], players: camelAll(players), machines: camelAll(machines), stages: out, activeStageId: active?.id ?? null };
@@ -114,14 +125,22 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
   app.post(`${base}/players`, { preHandler: authed }, async (req, reply: FastifyReply) => {
     const b = names.parse(req.body);
     const r = await write(req, async (c, p, t) => {
-      if (t.status !== 'draft') throw conflict('TOURNAMENT_STARTED', 'Spelare kan bara läggas till innan turneringen startat.');
+      let lateStage: Stage | null = null;
+      if (t.status !== 'draft') {
+        const running = (await c.query("select id, no, kind, name, config, status, current_round, final_ranking, rng_seed from pinball_stages where tournament_id = $1 and status = 'running'", [p.id])).rows[0] as Stage | undefined;
+        const first = (await c.query('select min(no)::int as n from pinball_stages where tournament_id = $1', [p.id])).rows[0].n as number;
+        if (!running || running.no !== first || !['best_game', 'matchplay', 'swiss'].includes(running.kind)) throw conflict('LATE_ENTRY_NOT_ALLOWED', 'Sena anmälningar går bara i första steget när det är kval, matchplay eller Swiss och pågår. De går med från nästa omgång.');
+        lateStage = running;
+      }
       const list = [...new Map(b.names.map((n) => [n.toLowerCase(), n])).values()];
       const cur = (await c.query('select lower(name) as n, seed from pinball_players where tournament_id = $1', [p.id])).rows as Array<{ n: string; seed: number }>;
       if (cur.length + list.length > MAX_PLAYERS) throw conflict('TOO_MANY_PLAYERS', `Högst ${MAX_PLAYERS} spelare.`);
       const dup = list.filter((n) => cur.some((x) => x.n === n.toLowerCase())); if (dup.length) throw conflict('PLAYER_EXISTS', `Finns redan: ${dup.join(', ')}`, { names: dup });
       let seed = Math.max(0, ...cur.map((x) => x.seed));
-      for (const n of list) await c.query('insert into pinball_players (workspace_id, tournament_id, name, seed) values ($1,$2,$3,$4)', [p.wid, p.id, n, ++seed]);
-      await log(c, req, 'players_added', p.wid, p.id, { count: list.length }); return { added: list.length };
+      const newIds: string[] = [];
+      for (const n of list) newIds.push((await c.query('insert into pinball_players (workspace_id, tournament_id, name, seed) values ($1,$2,$3,$4) returning id', [p.wid, p.id, n, ++seed])).rows[0].id);
+      if (lateStage) { lateStage.config._players = [...(lateStage.config._players as string[]), ...newIds]; await c.query('update pinball_stages set config = $2 where id = $1', [lateStage.id, JSON.stringify(lateStage.config)]); }
+      await log(c, req, 'players_added', p.wid, p.id, { count: list.length, late: !!lateStage }); return { added: list.length };
     });
     return reply.code(201).send(r);
   });
@@ -196,15 +215,16 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
 
   const history = async (c: Db, stageId: string) => {
     const h: History = new Map(); const played = new Map<string, Map<string, number>>();
-    const gs = (await c.query('select g.id, gm.machine_id from pinball_groups g left join pinball_games gm on gm.group_id = g.id and gm.game_no = 1 where g.stage_id = $1', [stageId])).rows as Array<{ id: string; machine_id: string | null }>;
+    const gs = (await c.query('select g.id, gm.machine_id from pinball_groups g left join pinball_games gm on gm.group_id = g.id where g.stage_id = $1', [stageId])).rows as Array<{ id: string; machine_id: string | null }>;
     const gp = gs.length ? (await c.query('select group_id, player_id from pinball_group_players where group_id = any($1)', [gs.map((x) => x.id)])).rows as Array<{ group_id: string; player_id: string }> : [];
-    for (const g of gs) { const ids = gp.filter((x) => x.group_id === g.id).map((x) => x.player_id); if (ids.length === 1) { const m = h.get(ids[0]!) ?? new Map<string, number>(); m.set('\0bye', 1); h.set(ids[0]!, m); } else addHistory(h, ids); if (g.machine_id) for (const id of ids) { const m = played.get(id) ?? new Map<string, number>(); m.set(g.machine_id, (m.get(g.machine_id) ?? 0) + 1); played.set(id, m); } }
+    const seenG = new Set<string>(); for (const g of gs) { const ids = gp.filter((x) => x.group_id === g.id).map((x) => x.player_id); if (!seenG.has(g.id)) { seenG.add(g.id); if (ids.length === 1) { const m = h.get(ids[0]!) ?? new Map<string, number>(); m.set('\0bye', 1); h.set(ids[0]!, m); } else addHistory(h, ids); } if (g.machine_id) for (const id of ids) { const m = played.get(id) ?? new Map<string, number>(); m.set(g.machine_id, (m.get(g.machine_id) ?? 0) + 1); played.set(id, m); } }
     return { h, played };
   };
-  const insertGroup = async (c: Db, wid: string, stageId: string, round: number, slot: number, ids: string[], machine: string | null, key: string | null = null, bye?: { points: number }) => {
+  const insertGroup = async (c: Db, wid: string, stageId: string, round: number, slot: number, ids: string[], machine: string | null | Array<string | null>, key: string | null = null, bye?: { points: number }) => {
     const g = (await c.query('insert into pinball_groups (workspace_id, stage_id, round, slot, bracket_key) values ($1,$2,$3,$4,$5) returning id', [wid, stageId, round, slot, key])).rows[0];
     for (const [i, pid] of ids.entries()) await c.query('insert into pinball_group_players (workspace_id, group_id, player_id, seat) values ($1,$2,$3,$4)', [wid, g.id, pid, i + 1]);
-    const gm = (await c.query('insert into pinball_games (workspace_id, group_id, game_no, machine_id, status) values ($1,$2,1,$3,$4) returning id', [wid, g.id, machine, bye ? 'done' : 'pending'])).rows[0];
+    const machs = Array.isArray(machine) ? machine : [machine]; let gm: { id: string } = { id: '' };
+    for (const [i, mid] of machs.entries()) gm = (await c.query('insert into pinball_games (workspace_id, group_id, game_no, machine_id, status) values ($1,$2,$3,$4,$5) returning id', [wid, g.id, i + 1, mid, bye ? 'done' : 'pending'])).rows[0];
     if (bye) await c.query('insert into pinball_scores (workspace_id, game_id, player_id, score, placement, points) values ($1,$2,$3,0,1,$4)', [wid, gm.id, ids[0], bye.points]);
   };
   const activeMachines = async (c: Db, tid: string) => (await c.query('select id from pinball_machines where tournament_id = $1 and active order by sort, id', [tid])).rows.map((x: any) => x.id as string);
@@ -219,9 +239,11 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
     const rng = rngFrom(s.rng_seed + round * 7919); const { h, played } = await history(c, s.id); const machines = await activeMachines(c, tid); const T = table(s);
     let groups: string[][]; let byes: string[] = [];
     if (s.kind === 'swiss') { const r = swissRound(active, h, s.config.groupSize, rng); groups = r.groups; byes = r.byes; }
+    else if (s.kind === 'group_knockout') groups = assignGroups(active, active.length <= s.config.groupSize ? [active.length] : groupSizes(active.length, s.config.groupSize), h, 'balanced', rng);
     else groups = assignGroups(active, groupSizes(active.length, s.config.groupSize), h, round === 1 && s.config.grouping === 'random' ? 'random' : s.config.grouping === 'balanced' ? 'balanced' : 'random', rng);
-    const ms = assignMachines(groups, machines, played, round);
-    for (const [i, g] of groups.entries()) await insertGroup(c, wid, s.id, round, i, g, ms[i] || null);
+    const perGame = s.kind === 'group_knockout' ? (s.config.gamesPerGroup as number) : 1; const msByGame: string[][] = [];
+    for (let k = 0; k < perGame; k++) { const ms = assignMachines(groups, machines, played, round + k); msByGame.push(ms); groups.forEach((g, i) => { for (const pid of g) { const m = played.get(pid) ?? new Map<string, number>(); m.set(ms[i]!, (m.get(ms[i]!) ?? 0) + 1); played.set(pid, m); } }); }
+    for (const [i, g] of groups.entries()) await insertGroup(c, wid, s.id, round, i, g, msByGame.map((x) => x[i] || null));
     for (const [i, b] of byes.entries()) await insertGroup(c, wid, s.id, round, groups.length + i, [b], null, null, { points: T[2][0]! });
     await c.query('update pinball_stages set current_round = $2 where id = $1', [s.id, round]);
   }
@@ -242,7 +264,7 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
     if (order.length < min) throw conflict('TOO_FEW_PLAYERS', `Minst ${min} spelare krävs för det här steget.`);
     s.config._players = order; await c.query("update pinball_stages set status = 'running', config = $2 where id = $1", [s.id, JSON.stringify(s.config)]);
     if (t.status === 'draft') await c.query("update tournaments set status = 'running', updated_at = now() where id = $1", [p.id]);
-    if (s.kind === 'matchplay' || s.kind === 'swiss') await genRound(c, p.wid, p.id, s, 1, order);
+    if (s.kind === 'matchplay' || s.kind === 'swiss' || s.kind === 'group_knockout') await genRound(c, p.wid, p.id, s, 1, order);
     else if (s.kind === 'round_robin') {
       const fx = roundRobin(order, s.config.doubleRound); const { played } = await history(c, s.id); let maxR = 0;
       for (const r of [...new Set(fx.map((f) => f.round))]) { const round = fx.filter((f) => f.round === r); const ms = assignMachines(round.map((f) => [f.home, f.away]), machines, played, r); for (const [i, f] of round.entries()) { await insertGroup(c, p.wid, s.id, r, i, [f.home, f.away], ms[i] || null); for (const id of [f.home, f.away]) { const m = played.get(id) ?? new Map<string, number>(); m.set(ms[i]!, (m.get(ms[i]!) ?? 0) + 1); played.set(id, m); } } maxR = r; }
@@ -270,11 +292,16 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
   }
 
   app.post(`${base}/stages/:sid/next-round`, { preHandler: authed }, async (req) => write(req, async (c, p) => {
-    const s = await stageOf(c, p.id, p.sid); if (s.status !== 'running' || (s.kind !== 'matchplay' && s.kind !== 'swiss')) throw conflict('NOT_APPLICABLE', 'Steget har inga omgångar att generera.');
-    if (s.current_round >= s.config.rounds) throw conflict('LAST_ROUND', 'Alla omgångar är redan skapade.');
+    const s = await stageOf(c, p.id, p.sid); if (s.status !== 'running' || (s.kind !== 'matchplay' && s.kind !== 'swiss' && s.kind !== 'group_knockout')) throw conflict('NOT_APPLICABLE', 'Steget har inga omgångar att generera.');
+    if (s.kind !== 'group_knockout' && s.current_round >= s.config.rounds) throw conflict('LAST_ROUND', 'Alla omgångar är redan skapade.');
     const open = (await c.query(`select 1 from pinball_games gm join pinball_groups g on g.id = gm.group_id where g.stage_id = $1 and g.round = $2 and gm.status <> 'done' limit 1`, [s.id, s.current_round])).rowCount;
     if (open) throw conflict('ROUND_NOT_DONE', 'Alla matcher i den pågående omgången måste vara klara.');
-    await genRound(c, p.wid, p.id, s, s.current_round + 1, await standingOrder(c, p.id, s)); await log(c, req, 'round_generated', p.wid, p.id, { round: s.current_round + 1 }); return { round: s.current_round + 1 };
+    if (s.kind === 'group_knockout') {
+      const st = (await pinballView(c, { id: p.id })).stages.find((x) => x.id === s.id) as any; const last = st.groupResults[st.groupResults.length - 1];
+      if (last.groups.length === 1) throw conflict('LAST_ROUND', 'Finalgruppen är redan skapad.');
+      const adv = (last.groups as any[]).flatMap((g) => (g.rows as any[]).filter((r) => r.advances)).sort((a, b) => a.rank - b.rank || b.points - a.points || (s.config._players as string[]).indexOf(a.playerId) - (s.config._players as string[]).indexOf(b.playerId)).map((r) => r.playerId as string);
+      await genRound(c, p.wid, p.id, s, s.current_round + 1, adv);
+    } else await genRound(c, p.wid, p.id, s, s.current_round + 1, await standingOrder(c, p.id, s)); await log(c, req, 'round_generated', p.wid, p.id, { round: s.current_round + 1 }); return { round: s.current_round + 1 };
   }, P.extend({ sid: uuid })));
 
   app.post(`${base}/stages/:sid/finish`, { preHandler: authed }, async (req) => write(req, async (c, p) => {
@@ -284,7 +311,8 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
     else {
       const open = (st.groups as any[]).some((g) => ['ready', 'playing'].includes(g.status)); if (open) throw conflict('MATCHES_OPEN', 'Alla matcher måste vara klara.');
       if (s.kind === 'matchplay' || s.kind === 'swiss') { if (s.current_round < s.config.rounds) throw conflict('ROUNDS_LEFT', 'Alla omgångar måste spelas.'); }
-      if (s.kind === 'single_elim' || s.kind === 'double_elim') { if (!st.placements) throw conflict('MATCHES_OPEN', 'Utslagningen är inte avgjord.'); ranking = st.placements; }
+      if (s.kind === 'group_knockout') { if (!st.placements) throw conflict('ROUNDS_LEFT', 'Spela klart omgångarna till och med finalgruppen först.'); ranking = st.placements; }
+      else if (s.kind === 'single_elim' || s.kind === 'double_elim') { if (!st.placements) throw conflict('MATCHES_OPEN', 'Utslagningen är inte avgjord.'); ranking = st.placements; }
       else ranking = (st.standings as Array<{ playerId: string; rank: number }>).map((x) => ({ playerId: x.playerId, rank: x.rank }));
     }
     await c.query("update pinball_stages set status = 'finished', final_ranking = $2 where id = $1", [s.id, JSON.stringify(ranking)]); await log(c, req, 'stage_finished', p.wid, p.id, { kind: s.kind }); return { ok: true, ranking };

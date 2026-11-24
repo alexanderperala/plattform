@@ -156,3 +156,62 @@ describe('Flipper: bordsstatus, behörighet och isolering', () => {
     expect((await pool.query('select count(*)::int as n from pinball_players')).rows[0].n).toBe(0);
   });
 });
+
+describe('Flipper: gruppslutspel, bronsmatch och sena anmälningar', () => {
+  it('gruppslutspel: grupper om fyra med tre spel på olika maskiner, två går vidare per omgång tills finalgrupp, unik slutranking', async () => {
+    const c = await reg(); const id = await setup(c, 16, 4); const sid = await addStage(c, id, { kind: 'group_knockout', config: { groupSize: 4, advancePerGroup: 2, gamesPerGroup: 3 } });
+    expect((await start(c, id, sid)).statusCode).toBe(200);
+    let st = await stageOf(c, id, sid); expect(st.groups).toHaveLength(4);
+    for (const g of st.groups) { expect(g.games).toHaveLength(3); expect(new Set(g.games.map((x: any) => x.machineId)).size).toBe(3); }
+    const playAll = async () => { for (let i = 0; i < 100; i++) { const v = await view(c, id); const names = new Map<string, string>(v.players.map((p: any) => [p.id, p.name])); const cur = v.stages.find((x: any) => x.id === sid); const g = cur.groups.find((x: any) => x.status !== 'done'); if (!g) return;
+      const game = g.games.find((x: any) => x.status !== 'done'); const r = await tcall(c, id, 'PUT', `/games/${game.id}/scores`, { scores: g.playerIds.map((pid: string) => ({ playerId: pid, score: 1000 - Number(names.get(pid)!.slice(-2)) })) }); expect(r.statusCode, r.body).toBe(200); } };
+    expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).json().error.code).toBe('ROUND_NOT_DONE');
+    await playAll(); st = await stageOf(c, id, sid); expect(st.groupResults[0].groups.every((g: any) => g.complete && g.rows.filter((r: any) => r.advances).length === 2)).toBe(true);
+    expect((await tcall(c, id, 'POST', `/stages/${sid}/finish`, {})).json().error.code).toBe('ROUNDS_LEFT');
+    expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).statusCode).toBe(200); st = await stageOf(c, id, sid); expect(st.groups.filter((g: any) => g.round === 2)).toHaveLength(2);
+    const first = st.groups.find((g: any) => g.round === 1); expect((await tcall(c, id, 'DELETE', `/games/${first.games[0].id}/scores`)).json().error.code).toBe('RESULT_LOCKED'); // nästa omgång finns
+    await playAll(); expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).statusCode).toBe(200); st = await stageOf(c, id, sid); const fin = st.groups.filter((g: any) => g.round === 3); expect(fin).toHaveLength(1); expect(fin[0].playerIds).toHaveLength(4);
+    await playAll(); expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).json().error.code).toBe('LAST_ROUND');
+    const done = await tcall(c, id, 'POST', `/stages/${sid}/finish`, {}); expect(done.statusCode, done.body).toBe(200); const r = done.json().ranking;
+    expect(r.map((x: any) => x.rank)).toEqual(Array.from({ length: 16 }, (_, i) => i + 1)); expect(new Set(r.map((x: any) => x.playerId)).size).toBe(16);
+    const v = await view(c, id); expect(v.players.find((p: any) => p.id === r[0].playerId).name).toBe('Spelare 01'); expect(new Set(r.slice(0, 4).map((x: any) => x.playerId))).toEqual(new Set(fin[0].playerIds));
+    const g1 = st.groups.find((g: any) => g.round === 1); expect((await tcall(c, id, 'DELETE', `/games/${g1.games[0].id}/scores`)).json().error.code).toBe('STAGE_NOT_RUNNING'); // avslutat steg kan inte ändras
+  });
+  it('gruppslutspel med udda antal och grupper om tre/en vidare tar slut och ger alla en placering', async () => {
+    const c = await reg(); const id = await setup(c, 10, 3); const sid = await addStage(c, id, { kind: 'group_knockout', config: { groupSize: 3, advancePerGroup: 1, gamesPerGroup: 1 } }); await start(c, id, sid);
+    for (let guard = 0; guard < 20; guard++) {
+      const v = await view(c, id); const names = new Map<string, string>(v.players.map((p: any) => [p.id, p.name])); let st = v.stages.find((x: any) => x.id === sid);
+      for (const g of st.groups.filter((x: any) => x.status !== 'done')) await tcall(c, id, 'PUT', `/games/${g.games[0].id}/scores`, { scores: g.playerIds.map((pid: string) => ({ playerId: pid, score: 1000 - Number(names.get(pid)!.slice(-2)) })) });
+      st = await stageOf(c, id, sid); if (st.placements) break; expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).statusCode).toBe(200);
+    }
+    const fin = await tcall(c, id, 'POST', `/stages/${sid}/finish`, {}); expect(fin.statusCode, fin.body).toBe(200); expect(fin.json().ranking).toHaveLength(10);
+  });
+  it('bronsmatch i enkel utslagning: spelas mellan semifinalförlorarna och krävs för att steget ska kunna avslutas', async () => {
+    const c = await reg(); const id = await setup(c, 8, 2); const sid = await addStage(c, id, { kind: 'single_elim', config: { bestOf: 1, bronzeMatch: true } }); await start(c, id, sid);
+    for (let i = 0; i < 20; i++) { const st = await stageOf(c, id, sid); const g = st.groups.find((x: any) => x.status === 'ready' && x.bracketKey !== 'BM' && x.bracketKey !== 'W3-0'); if (!g) break; await playReady1(c, id, sid, g); }
+    let st = await stageOf(c, id, sid); const bm = st.groups.find((g: any) => g.bracketKey === 'BM'); expect(bm.label).toBe('Bronsmatch'); expect(bm.rowLabel).toBe('Final'); expect(bm.status).toBe('ready'); expect(bm.playerIds).toHaveLength(2);
+    const fin = st.groups.find((g: any) => g.bracketKey === 'W3-0'); await playReady1(c, id, sid, fin); expect((await tcall(c, id, 'POST', `/stages/${sid}/finish`, {})).json().error.code).toBe('MATCHES_OPEN');
+    await playReady1(c, id, sid, (await stageOf(c, id, sid)).groups.find((g: any) => g.bracketKey === 'BM'));
+    const done = await tcall(c, id, 'POST', `/stages/${sid}/finish`, {}); expect(done.statusCode, done.body).toBe(200); expect(done.json().ranking.slice(0, 4).map((x: any) => x.rank)).toEqual([1, 2, 3, 4]); expect(done.json().ranking).toHaveLength(8);
+    const bmFinal = (await stageOf(c, id, sid)).groups.find((g: any) => g.bracketKey === 'BM'); expect(done.json().ranking[2].playerId).toBe(bmFinal.winnerId);
+  });
+  it('sena anmälningar: går med från nästa omgång i matchplay och kval, men inte i utslagning eller senare steg', async () => {
+    const c = await reg(); const id = await setup(c, 8, 4); const sid = await addStage(c, id, { kind: 'matchplay', config: { rounds: 2, groupSize: 4 } }); await start(c, id, sid);
+    const late = await tcall(c, id, 'POST', '/players', { names: ['Sen Spelare'] }); expect(late.statusCode).toBe(201);
+    await playReady(c, id, sid); expect((await tcall(c, id, 'POST', `/stages/${sid}/next-round`, {})).statusCode).toBe(200);
+    const st = await stageOf(c, id, sid); const r2 = st.groups.filter((g: any) => g.round === 2); expect(r2.map((g: any) => g.playerIds.length).sort()).toEqual([3, 3, 3]);
+    const v = await view(c, id); const sen = v.players.find((p: any) => p.name === 'Sen Spelare'); expect(r2.flatMap((g: any) => g.playerIds)).toContain(sen.id); expect(st.playerIds).toContain(sen.id);
+    expect((await tcall(c, id, 'POST', '/players', { names: ['Sen Spelare'] })).json().error.code).toBe('PLAYER_EXISTS');
+    // utslagning: inga sena anmälningar
+    const c2 = await reg(); const id2 = await setup(c2, 4, 2); const e = await addStage(c2, id2, { kind: 'single_elim', config: {} }); await start(c2, id2, e);
+    expect((await tcall(c2, id2, 'POST', '/players', { names: ['För sent'] })).json().error.code).toBe('LATE_ENTRY_NOT_ALLOWED');
+    // kval: ny spelare kan registrera försök direkt
+    const c3 = await reg(); const id3 = await setup(c3, 3, 2); const q = await addStage(c3, id3, { kind: 'best_game', config: {} }); await start(c3, id3, q);
+    expect((await tcall(c3, id3, 'POST', '/players', { names: ['Nykomling'] })).statusCode).toBe(201); const v3 = await view(c3, id3); const nk = v3.players.find((p: any) => p.name === 'Nykomling');
+    expect((await tcall(c3, id3, 'POST', `/stages/${q}/attempts`, { playerId: nk.id, machineId: v3.machines[0].id, score: 12345 })).statusCode).toBe(201); expect(await auditRows(`action = 'tournament.pinball.players_added' and meta->>'late' = 'true'`)).toHaveLength(2);
+  });
+});
+async function playReady1(c: TestCustomer, id: string, sid: string, g: any) {
+  const v = await view(c, id); const names = new Map<string, string>(v.players.map((p: any) => [p.id, p.name])); const fresh = v.stages.find((x: any) => x.id === sid).groups.find((x: any) => x.id === g.id); const game = fresh.games.find((x: any) => x.status !== 'done');
+  const r = await tcall(c, id, 'PUT', `/games/${game.id}/scores`, { scores: fresh.playerIds.map((pid: string) => ({ playerId: pid, score: 1000 - Number(names.get(pid)!.slice(-2)) })) }); expect(r.statusCode, r.body).toBe(200);
+}

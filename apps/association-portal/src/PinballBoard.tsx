@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 // Spelplan/matris som alla utgår från: rader = omgångar/matchsteg, kolumner = maskiner. Samma komponent används live (med redigering)
 // och i den publika vyn (skrivskyddad, onGame utelämnas). Texten renderas alltid som text.
-export const KIND: Record<string, string> = { best_game: 'Kval (försök)', matchplay: 'Matchplay', swiss: 'Swiss', round_robin: 'Serie', single_elim: 'Utslagning', double_elim: 'Dubbel utslagning' };
+export const KIND: Record<string, string> = { best_game: 'Kval (försök)', matchplay: 'Matchplay', swiss: 'Swiss', round_robin: 'Serie', single_elim: 'Utslagning', group_knockout: 'Gruppslutspel', double_elim: 'Dubbel utslagning' };
 const STAGE_STATUS: Record<string, string> = { pending: 'Väntar', running: 'Pågår', finished: 'Klart' };
 const fmtScore = (n: number) => new Intl.NumberFormat('sv-SE').format(n);
 
@@ -58,7 +58,22 @@ function Cell({ g, game, name, onGame, nGames }: { g: any; game: any; name: (id:
   return clickable ? <button className={`pcell ${status}`} onClick={() => onGame(g, game)}>{body}</button> : <div className={`pcell ${status}`}>{body}</div>;
 }
 
+function GroupResults({ stage, name }: { stage: any; name: (id: string) => string }) {
+  const nGroups = (r: number) => stage.groupResults.find((x: any) => x.round === r)?.groups.length ?? 0; const last = stage.groupResults.length ? stage.groupResults[stage.groupResults.length - 1].round : 0;
+  return (
+    <section><h3>Gruppresultat</h3>
+      {stage.groupResults.map((r: any) => <div key={r.round}><h4>{r.round === last && nGroups(r.round) === 1 ? 'Finalgrupp' : `Omgång ${r.round}`}</h4>
+        <div className="grid2">{r.groups.map((g: any, gi: number) => (
+          <div key={g.groupId} className="table-wrap"><table className="table" aria-label={`Grupp ${r.round}.${gi + 1}`}><thead><tr><th>#</th><th>Spelare</th><th>Poäng</th><th>Segrar</th></tr></thead>
+            <tbody>{g.rows.map((x: any) => <tr key={x.playerId} className={g.complete && x.advances && nGroups(r.round) > 1 ? 'advances' : ''}><td>{x.rank}</td><td>{name(x.playerId)}</td><td><strong>{x.points}</strong></td><td>{x.firsts}</td></tr>)}</tbody></table></div>))}</div></div>)}
+      <div className="muted small">Markerade rader går vidare. Vid lika poäng avgör flest segrar, därefter seedning.</div>
+      {stage.placements && <><h3>Slutplacering</h3><ol aria-label="Slutplacering">{stage.placements.map((x: any) => <li key={x.playerId}>{name(x.playerId)}</li>)}</ol></>}
+    </section>
+  );
+}
+
 function Standings({ stage, name }: { stage: any; name: (id: string) => string }) {
+  if (stage.kind === 'group_knockout') return stage.groupResults ? <GroupResults stage={stage} name={name} /> : null;
   const rows: Array<{ rank: number; playerId: string; cols: Array<string | number> }> | null =
     stage.standings ? stage.standings.map((r: any) => ({ rank: r.rank, playerId: r.playerId, cols: [r.games, r.points, r.firsts] })) :
     stage.placements ? stage.placements.map((r: any) => ({ rank: r.rank, playerId: r.playerId, cols: [] })) : null;
