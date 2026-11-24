@@ -1,0 +1,64 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: plattform, POSTGRES_PASSWORD: plattform_dev, POSTGRES_DB: plattform_dev }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U plattform" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://plattform:plattform_dev@localhost:5432/plattform_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Skapa testdatabas
+        run: PGPASSWORD=plattform_dev psql -h localhost -U plattform -d plattform_dev -c 'create database plattform_test'
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Beroendeskanning (SEC-15)
+        run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: plattform, POSTGRES_PASSWORD: plattform_dev, POSTGRES_DB: plattform_dev }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U plattform" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: npm ci
+      - run: pip install playwright && playwright install --with-deps chromium
+      - name: Migrera och seeda (endast dev/CI, aldrig produktion)
+        run: npm run migrate && npm run seed
+      - name: Starta API och gränssnitt
+        run: |
+          APP_BASE_URL=http://127.0.0.1:5174 STRIPE_WEBHOOK_SECRET=whsec_e2e npm run dev -w apps/api > /tmp/api.log 2>&1 &
+          (cd apps/admin && npx vite --host 127.0.0.1 --port 5173 > /tmp/admin.log 2>&1) &
+          (cd apps/customer-account && npx vite --host 127.0.0.1 --port 5174 > /tmp/account.log 2>&1) &
+          (cd apps/association-portal && npx vite --host 127.0.0.1 --port 5175 > /tmp/portal.log 2>&1) &
+          (cd apps/tournament-system && npx vite --host 127.0.0.1 --port 5176 > /tmp/tournament.log 2>&1) &
+          for u in http://127.0.0.1:4000/healthz http://127.0.0.1:5173 http://127.0.0.1:5174 http://127.0.0.1:5175 http://127.0.0.1:5176; do
+            for i in $(seq 1 60); do curl -sf "$u" > /dev/null && break; sleep 1; done
+          done
+      - name: Browser-E2E
+        run: bash apps/admin/e2e/run-all.sh
+      - if: failure()
+        run: tail -n 80 /tmp/api.log
