@@ -122,9 +122,8 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
   });
 
   // ---- spelare ----
-  app.post(`${base}/players`, { preHandler: authed }, async (req, reply: FastifyReply) => {
-    const b = names.parse(req.body);
-    const r = await write(req, async (c, p, t) => {
+  /** Lägger till spelare (manuellt eller ur medlemsregistret). Före start: alltid. Efter start: bara i första steget om det är kval, matchplay eller Swiss. */
+  const addPlayers = async (c: Db, req: any, p: any, t: { status: string }, inputNames: string[], source: 'manual' | 'members') => {
       let lateStage: Stage | null = null;
       if (t.status !== 'draft') {
         const running = (await c.query("select id, no, kind, name, config, status, current_round, final_ranking, rng_seed from pinball_stages where tournament_id = $1 and status = 'running'", [p.id])).rows[0] as Stage | undefined;
@@ -132,7 +131,7 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
         if (!running || running.no !== first || !['best_game', 'matchplay', 'swiss'].includes(running.kind)) throw conflict('LATE_ENTRY_NOT_ALLOWED', 'Sena anmälningar går bara i första steget när det är kval, matchplay eller Swiss och pågår. De går med från nästa omgång.');
         lateStage = running;
       }
-      const list = [...new Map(b.names.map((n) => [n.toLowerCase(), n])).values()];
+      const list = [...new Map(inputNames.map((n) => [n.toLowerCase(), n])).values()];
       const cur = (await c.query('select lower(name) as n, seed from pinball_players where tournament_id = $1', [p.id])).rows as Array<{ n: string; seed: number }>;
       if (cur.length + list.length > MAX_PLAYERS) throw conflict('TOO_MANY_PLAYERS', `Högst ${MAX_PLAYERS} spelare.`);
       const dup = list.filter((n) => cur.some((x) => x.n === n.toLowerCase())); if (dup.length) throw conflict('PLAYER_EXISTS', `Finns redan: ${dup.join(', ')}`, { names: dup });
@@ -140,7 +139,26 @@ export function pinballRoutes(app: FastifyInstance, { authed, requireMember }: H
       const newIds: string[] = [];
       for (const n of list) newIds.push((await c.query('insert into pinball_players (workspace_id, tournament_id, name, seed) values ($1,$2,$3,$4) returning id', [p.wid, p.id, n, ++seed])).rows[0].id);
       if (lateStage) { lateStage.config._players = [...(lateStage.config._players as string[]), ...newIds]; await c.query('update pinball_stages set config = $2 where id = $1', [lateStage.id, JSON.stringify(lateStage.config)]); }
-      await log(c, req, 'players_added', p.wid, p.id, { count: list.length, late: !!lateStage }); return { added: list.length };
+      await log(c, req, 'players_added', p.wid, p.id, { count: list.length, late: !!lateStage, source }); return { added: list.length };
+  };
+  app.post(`${base}/players`, { preHandler: authed }, async (req, reply: FastifyReply) => {
+    const b = names.parse(req.body); const r = await write(req, (c, p, t) => addPlayers(c, req, p, t, b.names, 'manual')); return reply.code(201).send(r);
+  });
+  const requireMembers = async (c: Db, wid: string) => { const m = await modeFor(c, wid); if (!canRead(m.mode)) throw forbidden('Föreningsportalen är inte aktiverad, så medlemsregistret kan inte användas.', 'MEMBERS_NOT_AVAILABLE'); };
+  // Medlemsregistret som källa: bara namn kopieras (aldrig e-post, telefon eller anteckningar). Namnen blir publika om turneringen visas publikt.
+  app.get(`${base}/member-candidates`, { preHandler: authed }, async (req) => {
+    const p = P.parse(req.params); await requireMember(req, p.wid, ['owner', 'admin']);
+    return withWorkspace(p.wid, async (c) => { await guard(c, p.wid, false); await loadT(c, p.wid, p.id); await requireMembers(c, p.wid);
+      const rows = (await c.query(`select m.id, m.name from association_members m where m.workspace_id = $1 and m.status = 'active' and not exists (select 1 from pinball_players x where x.tournament_id = $2 and lower(x.name) = lower(m.name)) order by lower(m.name), m.id limit 1000`, [p.wid, p.id])).rows;
+      return { items: camelAll(rows) }; });
+  });
+  app.post(`${base}/players/from-members`, { preHandler: authed }, async (req, reply: FastifyReply) => {
+    const b = z.object({ memberIds: z.array(uuid).min(1).max(MAX_PLAYERS) }).strict().parse(req.body);
+    const r = await write(req, async (c, p, t) => {
+      await requireMembers(c, p.wid); const ids = [...new Set(b.memberIds)];
+      const rows = (await c.query(`select id, name from association_members where workspace_id = $1 and status = 'active' and id = any($2) order by lower(name), id`, [p.wid, ids])).rows as Array<{ id: string; name: string }>;
+      if (rows.length !== ids.length) throw conflict('MEMBER_NOT_FOUND', 'Någon av medlemmarna finns inte eller är inte aktiv.');
+      return addPlayers(c, req, p, t, rows.map((x) => x.name.trim().slice(0, 100)), 'members');
     });
     return reply.code(201).send(r);
   });

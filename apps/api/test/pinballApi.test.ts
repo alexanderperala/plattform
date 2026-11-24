@@ -215,3 +215,27 @@ async function playReady1(c: TestCustomer, id: string, sid: string, g: any) {
   const v = await view(c, id); const names = new Map<string, string>(v.players.map((p: any) => [p.id, p.name])); const fresh = v.stages.find((x: any) => x.id === sid).groups.find((x: any) => x.id === g.id); const game = fresh.games.find((x: any) => x.status !== 'done');
   const r = await tcall(c, id, 'PUT', `/games/${game.id}/scores`, { scores: fresh.playerIds.map((pid: string) => ({ playerId: pid, score: 1000 - Number(names.get(pid)!.slice(-2)) })) }); expect(r.statusCode, r.body).toBe(200);
 }
+
+describe('Flipper: spelare ur medlemsregistret', () => {
+  const member = async (c: TestCustomer, m: Record<string, unknown>) => (await custCall(app, { method: 'POST', url: `/workspaces/${c.workspaceId}/association/members`, cookie: c.cookie, payload: m })).json();
+  it('kandidater är aktiva medlemmar som inte redan är spelare; bara namn kopieras; dubbletter och okända id nekas', async () => {
+    const c = await reg(); const id = await setup(c, 1, 1);
+    const a = await member(c, { name: 'Anna Medlem', email: 'anna@example.test', phone: '070-111', notes: 'privat' }); const b = await member(c, { name: 'Bo Medlem', email: 'bo@example.test' }); const d = await member(c, { name: 'Dan Inaktiv', status: 'inactive' });
+    await member(c, { name: 'Spelare 01' }); // finns redan som spelare i turneringen
+    const cand = (await tcall(c, id, 'GET', '/member-candidates')).json().items.map((x: any) => x.name); expect(cand).toEqual(['Anna Medlem', 'Bo Medlem']);
+    const r = await tcall(c, id, 'POST', '/players/from-members', { memberIds: [a.id, b.id] }); expect(r.statusCode, r.body).toBe(201); expect(r.json().added).toBe(2);
+    const v = JSON.stringify(await view(c, id)); expect(v).toContain('Anna Medlem'); for (const leak of ['anna@example.test', '070-111', 'privat', 'bo@example.test']) expect(v, leak).not.toContain(leak);
+    expect((await tcall(c, id, 'POST', '/players/from-members', { memberIds: [a.id] })).json().error.code).toBe('PLAYER_EXISTS');
+    expect((await tcall(c, id, 'POST', '/players/from-members', { memberIds: [d.id] })).json().error.code).toBe('MEMBER_NOT_FOUND');
+    expect((await tcall(c, id, 'POST', '/players/from-members', { memberIds: ['00000000-0000-4000-8000-000000000000'] })).json().error.code).toBe('MEMBER_NOT_FOUND');
+    expect((await tcall(c, id, 'GET', '/member-candidates')).json().items).toEqual([]);
+    expect((await auditRows(`action = 'tournament.pinball.players_added' and meta->>'source' = 'members'`))).toHaveLength(1);
+  });
+  it('en annan förenings medlemmar kan inte importeras, och utan Föreningsportalen finns ingen medlemskälla', async () => {
+    const c = await reg(); const other = await reg(); const id = await setup(c, 1, 1); const foreign = await member(other, { name: 'Främmande Medlem' });
+    expect((await tcall(c, id, 'POST', '/players/from-members', { memberIds: [foreign.id] })).json().error.code).toBe('MEMBER_NOT_FOUND');
+    const only = await registerCustomer(app, { products: ['tournament_system'] }); const t = (await custCall(app, { method: 'POST', url: `/workspaces/${only.workspaceId}/tournaments`, cookie: only.cookie, payload: { name: 'X', format: 'pinball' } })).json();
+    expect((await tcall(only, t.id, 'GET', '/member-candidates')).json().error.code).toBe('MEMBERS_NOT_AVAILABLE');
+    expect((await tcall(only, t.id, 'POST', '/players/from-members', { memberIds: ['00000000-0000-4000-8000-000000000000'] })).json().error.code).toBe('MEMBERS_NOT_AVAILABLE');
+  });
+});

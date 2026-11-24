@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from './api';
-import { Alert, ErrorBox, Field, Modal } from './ui';
+import { Alert, ErrorBox, Field, Modal, useLoad } from './ui';
 import { KIND, PinballBoard } from './PinballBoard';
 
 const STATUS: Record<string, string> = { draft: 'Utkast', running: 'Pågår', finished: 'Avslutad' };
@@ -34,8 +34,34 @@ export function PinballManage({ wid, t, reload }: { wid: string; t: any; reload:
   );
 }
 
+/** Läser namn ur en CSV-fil: kolumnen "namn"/"name" om den finns, annars första kolumnen. Visas i textrutan så att användaren kan granska innan de läggs till. */
+function namesFromCsv(csv: string): string[] {
+  const rows = csv.replace(/^\uFEFF/, '').split(/\r?\n/).filter((r) => r.trim()); if (!rows.length) return [];
+  const sep = rows[0]!.includes(';') ? ';' : ','; const cells = (r: string) => r.split(sep).map((x) => x.trim().replace(/^"|"$/g, '').trim());
+  const head = cells(rows[0]!).map((x) => x.toLowerCase()); const idx = head.findIndex((x) => x === 'namn' || x === 'name'); const body = idx >= 0 ? rows.slice(1) : rows;
+  return body.map((r) => cells(r)[Math.max(idx, 0)] ?? '').filter(Boolean);
+}
+
+function MemberPicker({ base, onClose, onDone }: { base: string; onClose: () => void; onDone: () => void }) {
+  const { data, error } = useLoad(() => api<any>('GET', `${base}/member-candidates`), [base]); const [sel, setSel] = useState<Set<string>>(new Set()); const [err, setErr] = useState<unknown>(null);
+  const items: Array<{ id: string; name: string }> = data?.items ?? [];
+  const toggle = (id: string) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  async function go() { setErr(null); try { await api('POST', `${base}/players/from-members`, { memberIds: [...sel] }); onDone(); } catch (e) { setErr(e); } }
+  return (
+    <Modal title="Hämta spelare från medlemsregistret" onClose={onClose}>
+      <p className="muted small">Bara namnet kopieras. Namnen blir synliga för alla om turneringen visas publikt.</p>
+      {error != null ? <ErrorBox error={error} /> : !data ? <div className="loading">Laddar…</div> : items.length === 0 ? <div className="muted">Inga fler aktiva medlemmar att lägga till.</div> : <>
+        <label className="row"><input type="checkbox" aria-label="Markera alla" checked={sel.size === items.length} onChange={(e) => setSel(e.target.checked ? new Set(items.map((x) => x.id)) : new Set())} /> Markera alla ({items.length})</label>
+        <ul className="timeline" aria-label="Medlemmar" style={{ maxHeight: 320, overflow: 'auto' }}>{items.map((m) => <li key={m.id}><label className="row"><input type="checkbox" checked={sel.has(m.id)} onChange={() => toggle(m.id)} /> {m.name}</label></li>)}</ul></>}
+      {err != null && <ErrorBox error={err} />}
+      <div className="row"><button className="btn primary" disabled={sel.size === 0} onClick={() => void go()}>Lägg till {sel.size || ''} valda</button><button className="btn" onClick={onClose}>Avbryt</button></div>
+    </Modal>
+  );
+}
+
 function PlayersCard({ t, draft, act, base, move }: any) {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(''); const [picking, setPicking] = useState(false);
+  const readCsv = async (f: File | undefined) => { if (!f) return; const names = namesFromCsv(await f.text()); setText((cur) => [cur.trim(), ...names].filter(Boolean).join('\n')); };
   return (
     <section className="card"><h2>Spelare</h2>
       {t.players.length === 0 ? <div className="muted small">Inga spelare ännu.</div> : <ol className="timeline" aria-label="Spelare">{t.players.map((p: any, i: number) => (
@@ -44,7 +70,8 @@ function PlayersCard({ t, draft, act, base, move }: any) {
             : <button className="btn small" onClick={() => void act(() => api('PATCH', `${base}/players/${p.id}`, { withdrawn: !p.withdrawn }))}>{p.withdrawn ? 'Åter in' : 'Utgången'}</button>}</span></li>))}</ol>}
       {t.status !== 'finished' && <form onSubmit={(e) => { e.preventDefault(); void act(async () => { await api('POST', `${base}/players`, { names: lines(text) }); setText(''); }); }}>
         <Field label={draft ? 'Lägg till spelare' : 'Sen anmälan'} hint={draft ? 'Ett namn per rad. Ordningen är seedningen (nummer 1 = bäst).' : 'Går bara i första steget (kval, matchplay eller Swiss). Spelaren går med från nästa omgång.'}><textarea aria-label="Spelare att lägga till" rows={4} value={text} onChange={(e) => setText(e.target.value)} /></Field>
-        <button className="btn primary" disabled={lines(text).length === 0}>Lägg till</button></form>}
+        <div className="row"><button className="btn primary" disabled={lines(text).length === 0}>Lägg till</button><label className="btn">Läs in CSV<input type="file" accept=".csv,text/csv,text/plain" aria-label="Läs in CSV" hidden onChange={(e) => { void readCsv(e.target.files?.[0]); e.target.value = ''; }} /></label><button type="button" className="btn" onClick={() => setPicking(true)}>Från medlemsregistret</button></div></form>}
+      {picking && <MemberPicker base={base} onClose={() => setPicking(false)} onDone={() => { setPicking(false); void act(async () => undefined); }} />}
     </section>
   );
 }
