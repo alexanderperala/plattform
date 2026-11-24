@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { PinballBoard } from './PinballBoard';
 import { api } from './api';
 import { Alert, ErrorBox, Field, fmtDateTime, useLoad } from './ui';
 
@@ -41,7 +42,7 @@ export function PublicPageSettings({ wid }: { wid: string }) {
 /** Publik, skrivskyddad vy (ingen inloggning). Texten renderas alltid som text, aldrig som HTML. */
 export function PublicSite({ slug, tournamentId }: { slug: string; tournamentId?: string }) {
   // index.html sätter redan noindex,nofollow för hela appen.
-  return <div className="auth-wrap"><div className="auth-card" style={{ maxWidth: 760, width: '100%' }}>{tournamentId ? <PublicTournament slug={slug} id={tournamentId} /> : <PublicHome slug={slug} />}</div></div>;
+  return <div className="auth-wrap"><div className="auth-card" style={{ maxWidth: 1100, width: '100%' }}>{tournamentId ? <PublicTournament slug={slug} id={tournamentId} /> : <PublicHome slug={slug} />}</div></div>;
 }
 
 function PublicHome({ slug }: { slug: string }) {
@@ -59,9 +60,12 @@ function PublicHome({ slug }: { slug: string }) {
 }
 
 function PublicTournament({ slug, id }: { slug: string; id: string }) {
-  const { data: t, error } = useLoad(() => api<any>('GET', `/public/pages/${encodeURIComponent(slug)}/tournaments/${encodeURIComponent(id)}`), [slug, id]);
-  if (error != null) return <Alert kind="info">Turneringen finns inte.</Alert>;
+  const { data: t, error, reload } = useLoad(() => api<any>('GET', `/public/pages/${encodeURIComponent(slug)}/tournaments/${encodeURIComponent(id)}`), [slug, id]);
+  const running = t?.status === 'running';
+  useEffect(() => { if (!running) return; const i = setInterval(reload, 10000); return () => clearInterval(i); }, [running, reload]); // live: uppdateras var 10:e sekund
+  if (error != null && !t) return <Alert kind="info">Turneringen finns inte.</Alert>;
   if (!t) return <div className="loading">Laddar…</div>;
+  if (t.format === 'pinball') return <><a href={`/p/${slug}`} className="small">← {t.associationName}</a><h1>{t.name}</h1><div className="row between"><span className="muted small">{running ? 'Pågår – uppdateras automatiskt' : t.status === 'finished' ? 'Avslutad' : ''}</span><button className="btn noprint" onClick={() => window.print()}>Skriv ut</button></div><PinballBoard t={t} /></>;
   const name = (tid: string | null) => t.teams.find((x: any) => x.id === tid)?.name ?? '–';
   const Tbl = ({ rows }: { rows: any[] }) => <table className="table"><thead><tr><th>#</th><th>Lag</th><th>S</th><th>V</th><th>O</th><th>F</th><th>+/-</th><th>P</th></tr></thead><tbody>{rows.map((r) => <tr key={r.teamId}><td>{r.rank}</td><td>{name(r.teamId)}</td><td>{r.played}</td><td>{r.won}</td><td>{r.drawn}</td><td>{r.lost}</td><td>{r.goalDiff}</td><td><strong>{r.points}</strong></td></tr>)}</tbody></table>;
   const played = t.matches.filter((m: any) => !m.bye && m.homeScore !== null);

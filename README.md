@@ -8,7 +8,7 @@ Monorepo (npm workspaces):
 | `apps/admin` | React + Vite Superadmin-gränssnitt | Implementerad (S0) |
 | `apps/customer-account` | Kundens kontoområde (konto, medlemmar, supportåtkomst) | Implementerad (grund) |
 | `apps/association-portal` | Föreningsportal | Medlemsregister, import, nyheter, kalender, port 5175 |
-| `apps/tournament-system` | Turneringssystem | Serier, utslagning, gruppspel + slutspel: lag, spelschema/bracket, resultat, tabell, port 5176 |
+| `apps/tournament-system` | Turneringssystem | Serier, utslagning, gruppspel + slutspel samt flipper (kval, matchplay, Swiss, enkel/dubbel utslagning, spelplansmatris), port 5176 |
 | `docs/` | `kravspecifikation-v0.4.md`, `STATUS.md`, `DECISIONS.md`, skärmdumpar |
 
 ## Kom igång

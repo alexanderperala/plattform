@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
 import { Alert, ErrorBox, Field, Modal, useLoad } from './ui';
+import { PinballManage } from './PinballManage';
 
 const STATUS: Record<string, string> = { draft: 'Utkast', running: 'Pågår', finished: 'Avslutad' };
-const FORMAT: Record<string, string> = { round_robin: 'Serie', single_elimination: 'Utslagning', groups_knockout: 'Gruppspel + slutspel' };
+const FORMAT: Record<string, string> = { round_robin: 'Serie', single_elimination: 'Utslagning', groups_knockout: 'Gruppspel + slutspel', pinball: 'Flipper' };
 const roundName = (r: number, total: number) => (total - r === 0 ? 'Final' : total - r === 1 ? 'Semifinal' : total - r === 2 ? 'Kvartsfinal' : total - r === 3 ? 'Åttondelsfinal' : `Omgång ${r}`);
 const num = (v: string) => (v.trim() === '' ? null : Number(v));
 
@@ -20,7 +21,7 @@ export function Tournaments({ wid }: { wid: string }) {
         : <ul className="timeline">{data.items.map((t: any) => (
             <li key={t.id}><article>
               <div className="row between"><Link to={`/tournaments/${t.id}`}><strong>{t.name}</strong></Link><span className={`badge ${t.status === 'running' ? 'good' : t.status === 'finished' ? '' : 'warn'}`}>{STATUS[t.status]}</span></div>
-              <div className="muted small">{FORMAT[t.format]} · {t.teamCount} lag · {t.playedCount} av {t.matchCount} matcher spelade{t.doubleRound ? ' · dubbelserie' : ''}</div>
+              <div className="muted small">{FORMAT[t.format]} · {t.format === 'pinball' ? `${t.playerCount} spelare` : `${t.teamCount} lag · ${t.playedCount} av ${t.matchCount} matcher spelade${t.doubleRound ? ' · dubbelserie' : ''}`}</div>
             </article></li>))}</ul>)}
       {adding && <Create wid={wid} onClose={() => setAdding(false)} onDone={(id) => { setAdding(false); reload(); nav(`/tournaments/${id}`); }} />}
     </>
@@ -34,7 +35,7 @@ function Create({ wid, onClose, onDone }: { wid: string; onClose: () => void; on
     <Modal title="Ny turnering" onClose={onClose}>
       <form onSubmit={save}>
         <Field label="Namn"><input value={name} onChange={(e) => setName(e.target.value)} required maxLength={200} autoFocus /></Field>
-        <Field label="Format"><select aria-label="Format" value={format} onChange={(e) => setFormat(e.target.value)}><option value="round_robin">Serie (alla möter alla)</option><option value="single_elimination">Utslagning (cup)</option><option value="groups_knockout">Gruppspel + slutspel</option></select></Field>
+        <Field label="Format"><select aria-label="Format" value={format} onChange={(e) => setFormat(e.target.value)}><option value="round_robin">Serie (alla möter alla)</option><option value="single_elimination">Utslagning (cup)</option><option value="pinball">Flipper (kval, matchplay, Swiss, utslagning …)</option><option value="groups_knockout">Gruppspel + slutspel</option></select></Field>
         {format === 'groups_knockout' && <div className="row"><Field label="Antal grupper"><select aria-label="Antal grupper" value={groups} onChange={(e) => setGroups(e.target.value)}><option>2</option><option>4</option><option>8</option></select></Field><Field label="Vidare per grupp"><select aria-label="Vidare per grupp" value={adv} onChange={(e) => setAdv(e.target.value)}><option>1</option><option>2</option></select></Field></div>}
         {format === 'round_robin' && <label className="row"><input type="checkbox" checked={dbl} onChange={(e) => setDbl(e.target.checked)} /> Dubbelserie (hemma och borta)</label>}
         {error != null && <ErrorBox error={error} />}
@@ -50,6 +51,7 @@ export function TournamentView({ wid }: { wid: string }) {
   const [team, setTeam] = useState(''); const [err, setErr] = useState<unknown>(null); const [tie, setTie] = useState<any[] | null>(null);
   if (error != null) return <ErrorBox error={error} />;
   if (!t) return <div className="loading">Laddar…</div>;
+  if (t.format === 'pinball') return <PinballManage wid={wid} t={t} reload={reload} />;
   const name = (tid: string) => t.teams.find((x: any) => x.id === tid)?.name ?? '?';
   const act = async (fn: () => Promise<unknown>) => { setErr(null); try { await fn(); reload(); } catch (x) { setErr(x); } };
   const gk = t.format === 'groups_knockout';

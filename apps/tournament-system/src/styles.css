@@ -104,3 +104,20 @@ pre.json { background: var(--surface-2); border: 1px solid var(--border); border
 .qr { display: block; margin: .5rem auto; width: 200px; height: 200px; }
 
 tr.advance td { background: color-mix(in srgb, var(--good, #2e7d32) 12%, transparent); }
+
+/* Flipper: spelplansmatris */
+.pboard { display: grid; gap: 1rem; }
+.pmachines { display: flex; flex-wrap: wrap; gap: .5rem; }
+.pmachine { display: grid; gap: .1rem; min-width: 8.5rem; padding: .45rem .7rem; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); }
+.pmachine.free { border-color: var(--good); } .pmachine.busy { background: var(--warn-bg); border-color: var(--warn); } .pmachine.off { opacity: .5; }
+.pmatrix { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 640px; }
+.pmatrix th, .pmatrix td { border: 1px solid var(--border); padding: .4rem; vertical-align: top; text-align: left; }
+.pmatrix thead th { background: #f4f5f9; position: sticky; top: 0; } .pmatrix tbody th { background: #f4f5f9; white-space: nowrap; font-weight: 600; }
+.pcell { display: block; width: 100%; text-align: left; font: inherit; border: 1px solid var(--border); border-radius: 8px; padding: .35rem .5rem; margin-bottom: .35rem; background: #fff; color: inherit; }
+button.pcell { cursor: pointer; } button.pcell:hover { outline: 2px solid var(--accent, #3b5bdb); }
+.pcell.playing { background: var(--warn-bg); border-color: var(--warn); } .pcell.done { background: var(--good-bg); border-color: var(--good); } .pcell.wait { opacity: .65; border-style: dashed; }
+.prow { display: flex; justify-content: space-between; gap: .75rem; }
+tr.advances td { background: var(--good-bg); }
+@media print { .nav, .noprint, button.btn { display: none !important; } .pmatrix thead th { position: static; } }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin: 1rem 0; }
+textarea { width: 100%; font: inherit; }

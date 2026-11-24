@@ -20,6 +20,7 @@ import { eventRoutes } from './events.js';
 import { tournamentRoutes } from './tournaments.js';
 import { billingRoutes } from './billing.js';
 import { mailingRoutes, unsubscribeRoutes } from './mailings.js';
+import { pinballRoutes } from './pinball.js';
 import { publicPageAdminRoutes, publicPageRoutes } from './publicPage.js';
 import { canWrite, workspaceAccess, subscriptionAccess } from '../../domain/access.js';
 
@@ -400,6 +401,7 @@ export async function customerRoutes(app: FastifyInstance): Promise<void> {
   billingRoutes(app, { authed, requireMember });
   mailingRoutes(app, { authed, requireMember });
   unsubscribeRoutes(app);
+  pinballRoutes(app, { authed, requireMember });
   publicPageAdminRoutes(app, { authed, requireMember });
   publicPageRoutes(app);
 }

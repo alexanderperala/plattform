@@ -7,13 +7,14 @@ import { audit } from '../../services/audit.js';
 import { evaluateLimits } from '../../services/access.js';
 import { canCreate, canRead, canWrite } from '../../domain/access.js';
 import { knockout, nextSlot, qualifierSeeds, roundRobin, snakeGroups, standings } from '../../domain/tournament.js';
+import { pinballView } from './pinball.js';
 import { csvCell, modeFor, type Helpers } from './association.js';
 import { forbidden } from '../../lib/errors.js';
 
 const uuid = z.string().uuid();
 const NOT_AVAILABLE = () => forbidden('Turneringssystemet är inte aktiverat för den här arbetsytan.', 'PRODUCT_NOT_AVAILABLE');
 const READ_ONLY = () => forbidden('Arbetsytan eller produkten är skrivskyddad. Kontakta er administratör eller supporten.', 'WORKSPACE_READ_ONLY');
-const create = z.object({ name: z.string().trim().min(1).max(200), format: z.enum(['round_robin', 'single_elimination', 'groups_knockout']).default('round_robin'), doubleRound: z.boolean().default(false),
+const create = z.object({ name: z.string().trim().min(1).max(200), format: z.enum(['round_robin', 'single_elimination', 'groups_knockout', 'pinball']).default('round_robin'), doubleRound: z.boolean().default(false),
   groupCount: z.union([z.literal(2), z.literal(4), z.literal(8)]).optional(), advancePerGroup: z.union([z.literal(1), z.literal(2)]).optional() })
   .strict().refine((x) => x.format === 'round_robin' || !x.doubleRound, 'Dubbelserie gäller bara serie')
   .refine((x) => x.format === 'groups_knockout' ? x.groupCount !== undefined : x.groupCount === undefined && x.advancePerGroup === undefined, 'Antal grupper anges bara (och krävs) för gruppspel');
@@ -24,7 +25,8 @@ const score = z.object({ homeScore: z.number().int().min(0).max(999).nullable(),
 const MAX_TEAMS = 64;
 
 /** Gemensam vy över en turnering (lag, matcher, tabeller, slutspel). Används av både den inloggade och den publika vyn – innehåller bara lagnamn, aldrig personuppgifter. */
-export async function tournamentView(c: Parameters<typeof modeFor>[0], t: { id: string; format: string; status: string; group_count: number | null; advance_per_group: number | null; [k: string]: unknown }) {
+export async function tournamentView(c: Parameters<typeof modeFor>[0], t: { id: string; format: string; status: string; group_count: number | null; advance_per_group: number | null; [k: string]: unknown }): Promise<any> {
+    if (t.format === 'pinball') return pinballView(c, t);
     const teams = (await c.query('select id, name, group_no from tournament_teams where tournament_id = $1 order by lower(name), id', [t.id])).rows as { id: string; name: string; group_no: number | null }[];
     const matches = (await c.query('select id, round, position, group_no, home_team_id, away_team_id, home_score, away_score, winner_team_id from tournament_matches where tournament_id = $1 order by group_no nulls first, round, position nulls first, id', [t.id])).rows as
       { id: string; round: number; position: number | null; group_no: number | null; home_team_id: string | null; away_team_id: string | null; home_score: number | null; away_score: number | null; winner_team_id: string | null }[];
@@ -53,7 +55,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
   const load = async (c: Parameters<typeof modeFor>[0], wid: string, id: string, lock = false) => {
     const t = (await c.query(`select id, name, format, double_round, group_count, advance_per_group, status, is_public, created_at, updated_at from tournaments where id = $1 and workspace_id = $2${lock ? ' for update' : ''}`, [id, wid])).rows[0];
     if (!t) throw notFound('Turneringen hittades inte.');
-    return t as { is_public: boolean; id: string; name: string; format: 'round_robin' | 'single_elimination' | 'groups_knockout'; group_count: number | null; advance_per_group: number | null; status: 'draft' | 'running' | 'finished'; double_round: boolean };
+    return t as { is_public: boolean; id: string; name: string; format: 'round_robin' | 'single_elimination' | 'groups_knockout' | 'pinball'; group_count: number | null; advance_per_group: number | null; status: 'draft' | 'running' | 'finished'; double_round: boolean };
   };
   const log = (c: Parameters<typeof audit>[0], req: { id: string; customer?: { userId: string } | undefined }, action: string, wid: string, id: string, meta: Record<string, unknown> = {}) =>
     audit(c, { requestId: req.id }, { action: `tournament.${action}`, workspaceId: wid, userId: req.customer!.userId, targetType: 'tournament', targetId: id, meta: { by: 'customer', ...meta } });
@@ -65,6 +67,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
       const m = await guard(c, wid, false);
       const rows = (await c.query(`select t.id, t.name, t.format, t.double_round, t.status, t.is_public, t.created_at,
         (select count(*)::int from tournament_teams x where x.tournament_id = t.id) as team_count,
+        (select count(*)::int from pinball_players x where x.tournament_id = t.id) as player_count,
         (select count(*)::int from tournament_matches x where x.tournament_id = t.id and not (x.position is not null and x.round = 1 and x.away_team_id is null)) as match_count,
         (select count(*)::int from tournament_matches x where x.tournament_id = t.id and x.home_score is not null) as played_count
         from tournaments t where t.workspace_id = $1 order by t.created_at desc, t.id`, [wid])).rows;
@@ -164,6 +167,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     const row = await withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.status !== 'draft') throw conflict('TOURNAMENT_LOCKED', 'Lag kan bara läggas till innan turneringen startats.');
       const n = (await c.query<{ n: number }>('select count(*)::int as n from tournament_teams where tournament_id = $1', [p.id])).rows[0]!.n;
       if (n >= MAX_TEAMS) throw conflict('TOO_MANY_TEAMS', `En turnering kan ha högst ${MAX_TEAMS} lag.`);
@@ -179,6 +183,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     await withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.status !== 'draft') throw conflict('TOURNAMENT_LOCKED', 'Lag kan bara tas bort innan turneringen startats.');
       const r = await c.query('delete from tournament_teams where id = $1 and tournament_id = $2 and workspace_id = $3', [p.teamId, p.id, p.wid]);
       if (!r.rowCount) throw notFound('Laget hittades inte.');
@@ -192,6 +197,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     return withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.status !== 'draft') throw conflict('TOURNAMENT_LOCKED', 'Turneringen är redan startad.');
       const ids = (await c.query<{ id: string }>('select id from tournament_teams where tournament_id = $1 order by created_at, id', [p.id])).rows.map((x) => x.id);
       if (ids.length < 2) throw conflict('TOO_FEW_TEAMS', 'Minst två lag krävs för att starta.');
@@ -227,6 +233,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     return withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.status !== 'running') throw conflict('TOURNAMENT_NOT_RUNNING', t.status === 'draft' ? 'Turneringen har inte startats.' : 'Turneringen är avslutad.');
       const cur = (await c.query('select id, round, position, group_no, home_team_id, away_team_id from tournament_matches where id = $1 and tournament_id = $2 and workspace_id = $3 for update', [p.matchId, p.id, p.wid])).rows[0] as
         { round: number; position: number | null; group_no: number | null; home_team_id: string | null; away_team_id: string | null } | undefined;
@@ -260,6 +267,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     return withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.format !== 'groups_knockout') throw conflict('NOT_APPLICABLE', 'Gäller bara gruppspel med slutspel.');
       if (t.status !== 'running') throw conflict('TOURNAMENT_NOT_RUNNING', 'Turneringen pågår inte.');
       if ((await c.query('select 1 from tournament_matches where tournament_id = $1 and position is not null limit 1', [p.id])).rowCount) throw conflict('TOURNAMENT_LOCKED', 'Slutspelet är redan startat.');
@@ -301,6 +309,7 @@ export function tournamentRoutes(app: FastifyInstance, { authed, requireMember }
     return withWorkspace(p.wid, async (c) => {
       await guard(c, p.wid, true);
       const t = await load(c, p.wid, p.id, true);
+      if (t.format === 'pinball') throw conflict('WRONG_FORMAT', 'Det här är en flipperturnering. Använd flipper-funktionerna (spelare, maskiner, steg).');
       if (t.status !== 'running') throw conflict('TOURNAMENT_NOT_RUNNING', 'Bara pågående turneringar kan avslutas.');
       if (t.format === 'groups_knockout' && !(await c.query('select 1 from tournament_matches where tournament_id = $1 and position is not null limit 1', [p.id])).rowCount) throw conflict('TOURNAMENT_INCOMPLETE', 'Slutspelet har inte startats.');
       const open = (await c.query<{ n: number }>('select count(*)::int as n from tournament_matches where tournament_id = $1 and home_score is null and not (position is not null and round = 1 and away_team_id is null)', [p.id])).rows[0]!.n;

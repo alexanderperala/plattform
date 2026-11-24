@@ -106,4 +106,17 @@ describe('Publik sida (opt-in)', () => {
     expect((await pubGet('finns-inte', '10.8.8.8')).statusCode).toBe(404); // annan IP påverkas inte
     void withWorkspace;
   });
+
+  it('flipperturnering: publik live-vy med spelare, maskiner och resultat – bara om den valts, utan interna id eller e-post', async () => {
+    const c = await reg(); await enable(c, 'flipper');
+    const t = (await tour(c, 'POST', '', { name: 'Flipper-SM', format: 'pinball' })).json(); const pb = (m: 'POST' | 'PUT', extra: string, payload: unknown = {}) => custCall(app, { method: m, url: `/workspaces/${c.workspaceId}/tournaments/${t.id}/pinball${extra}`, cookie: c.cookie, payload });
+    await pb('POST', '/players', { names: ['Anna Flipper', 'Bosse Bumper', 'Cia Plunger', 'Dan Tilt'] }); await pb('POST', '/machines', { names: ['Medieval Madness', 'Attack from Mars'] });
+    const st = (await pb('POST', '/stages', { kind: 'matchplay', config: { rounds: 1 } })).json(); await pb('POST', `/stages/${st.id}/start`);
+    expect((await pubGet(`flipper/tournaments/${t.id}`)).statusCode).toBe(404); // inte vald ännu
+    expect((await tour(c, 'PATCH', `/${t.id}`, { isPublic: true })).statusCode).toBe(200);
+    const r = await pubGet(`flipper/tournaments/${t.id}`); expect(r.statusCode).toBe(200); const j = r.json();
+    expect(j.format).toBe('pinball'); expect(j.players.map((p: any) => p.name).sort()).toEqual(['Anna Flipper', 'Bosse Bumper', 'Cia Plunger', 'Dan Tilt']); expect(j.machines).toHaveLength(2); expect(j.stages[0].groups).toHaveLength(1);
+    const all = JSON.stringify(j); for (const leak of [c.workspaceId, c.userId, c.email, 'canManage']) expect(all, leak).not.toContain(leak);
+    expect((await pubGet('flipper')).json().tournaments.map((x: any) => x.name)).toEqual(['Flipper-SM']);
+  });
 });

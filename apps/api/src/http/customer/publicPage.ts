@@ -10,8 +10,8 @@ import { tournamentView } from './tournaments.js';
 import type { Helpers } from './association.js';
 
 const uuid = z.string().uuid();
-export const CONSENT_VERSION = '2026-11';
-export const CONSENT_TEXT = 'Jag bekräftar att föreningen har rätt att publicera innehållet, att inget som publiceras innehåller personuppgifter om medlemmar utan deras samtycke, och att nyheter och turneringsresultat blir synliga för alla på internet utan inloggning.';
+export const CONSENT_VERSION = '2026-11b';
+export const CONSENT_TEXT = 'Jag bekräftar att föreningen har rätt att publicera innehållet, att allt som publiceras (nyheter, lag- och spelarnamn samt resultat i de turneringar jag väljer att visa) får visas offentligt, att deltagarna har informerats eller samtyckt där det krävs, att inga andra personuppgifter om medlemmar publiceras, och att innehållet blir synligt för alla på internet utan inloggning.';
 const RESERVED = new Set(['admin', 'api', 'p', 'www', 'app', 'login', 'unsubscribe', 'static', 'assets', 'support', 'help']);
 const slug = z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])$/, 'Adressen får bara innehålla a–z, 0–9 och bindestreck, 3–40 tecken').refine((s) => !RESERVED.has(s) && !s.includes('--'), 'Adressen är reserverad eller ogiltig');
 const settings = z.object({ enabled: z.boolean(), slug, showNews: z.boolean().default(true), consent: z.literal(true).optional() }).strict();
